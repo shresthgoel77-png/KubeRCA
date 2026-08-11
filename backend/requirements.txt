@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+pydantic
+transformers
+peft
+torch
+accelerate
+bitsandbytes
+huggingface-hub
