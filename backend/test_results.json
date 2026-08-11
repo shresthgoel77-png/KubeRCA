@@ -1,0 +1,63 @@
+{
+  "1. OOMKilled": {
+    "failure": "Pod exits because memory is exhausted",
+    "root_cause": "memory exhaustion",
+    "confidence": 0.95,
+    "evidence": [
+      "container_memory_usage_above_threshold",
+      "processes consume all available memory",
+      "kubelet restart failed"
+    ],
+    "severity": "SEV-2",
+    "_status": 200,
+    "_hallucinated": true
+  },
+  "2. ImagePullBackOff": {
+    "failure": "Pod cannot retrieve its image because the registry provides no image available",
+    "root_cause": "image repository failure",
+    "confidence": 0.71,
+    "evidence": [
+      "pod frontend-ui requires an image \"registry.internal/frontend:v2.9.9\" that does not exist",
+      "container has failed image pull back off"
+    ],
+    "severity": "SEV-2",
+    "_status": 200,
+    "_hallucinated": true
+  },
+  "3. Pending / Insufficient CPU": {
+    "failure": "Pod remains Pending with unknown scheduling constraints",
+    "root_cause": "cpu capacity restriction",
+    "confidence": 0.92,
+    "evidence": [
+      "requested CPU load of 16",
+      "available cluster CPU is only 4"
+    ],
+    "severity": "SEV-2",
+    "_status": 200,
+    "_hallucinated": true
+  },
+  "4. Readiness Probe Failure": {
+    "failure": "Readiness probe fails because the required health endpoint is unavailable",
+    "root_cause": "health endpoint failure",
+    "confidence": 0.7,
+    "evidence": [
+      "readiness probe returns code 503",
+      "database connection timeouts after 3 seconds"
+    ],
+    "severity": "SEV-2",
+    "_status": 200,
+    "_hallucinated": true
+  },
+  "5. DNS / Service Connectivity": {
+    "failure": "pod cannot reach the external service",
+    "root_cause": "service_name_lookup failure",
+    "confidence": 0.71,
+    "evidence": [
+      "payment-gateway no longer exists",
+      "kubelet reports unable to look up the service name"
+    ],
+    "severity": "SEV-2",
+    "_status": 200,
+    "_hallucinated": true
+  }
+}

@@ -1,60 +1,142 @@
+import os
+import logging
+import time
+import uuid
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException
-import uvicorn
+from typing import List
 
-from config import settings
-from schemas import GenerateRequest, GenerateResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field, field_validator
+
 from model_runner import ModelRunner
 
-runner = None
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+)
+logger = logging.getLogger("kuberca")
+
+from schemas import DiagnoseRequest, DiagnosisResponse, HealthResponse
+
+# ---------------------------------------------------------------------------
+# CORS configuration
+# ---------------------------------------------------------------------------
+CORS_ORIGINS: List[str] = [
+    origin.strip()
+    for origin in os.getenv(
+        "CORS_ORIGINS",
+        "http://localhost:3000,http://localhost:5173",
+    ).split(",")
+    if origin.strip()
+]
+
+# ---------------------------------------------------------------------------
+# Application lifespan – load model once
+# ---------------------------------------------------------------------------
+runner: ModelRunner | None = None
+
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(_app: FastAPI):
     global runner
-    print("Starting up... loading model runner (this may take a while).")
+    logger.info("Starting up – loading KubeRCA model …")
     try:
         runner = ModelRunner()
-    except Exception as e:
-        print(f"Failed to load model: {e}")
+        logger.info("Model loaded successfully.")
+    except Exception:
+        logger.exception("Failed to load model.")
         runner = None
     yield
-    print("Shutting down... cleaning up.")
+    logger.info("Shutting down.")
     runner = None
 
+
 app = FastAPI(
-    title="KubeRCA Minimal Backend",
-    description="FastAPI backend for KubeRCA model inference",
+    title="KubeRCA API",
+    description="Kubernetes Root-Cause Analysis inference API",
     version="1.0.0",
-    lifespan=lifespan
+    lifespan=lifespan,
 )
 
-@app.post("/generate", response_model=GenerateResponse)
-async def generate_response(request: GenerateRequest):
+# ---------------------------------------------------------------------------
+# Middleware
+# ---------------------------------------------------------------------------
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=CORS_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+# ---------------------------------------------------------------------------
+# Global exception handler – never leak stack traces
+# ---------------------------------------------------------------------------
+@app.exception_handler(Exception)
+async def _unhandled_exception_handler(_request: Request, exc: Exception):
+    logger.exception("Unhandled exception: %s", exc)
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "Internal server error"},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Endpoints
+# ---------------------------------------------------------------------------
+@app.get("/health", response_model=HealthResponse)
+async def health():
+    return HealthResponse(
+        status="ok" if runner is not None else "unavailable",
+        model_loaded=runner is not None,
+        device=runner.device if runner else "n/a",
+    )
+
+
+@app.post("/diagnose", response_model=DiagnosisResponse)
+async def diagnose(body: DiagnoseRequest):
     if runner is None:
-        raise HTTPException(
-            status_code=503, 
-            detail="Model is currently unavailable. It might be loading or failed to load."
-        )
-        
+        raise HTTPException(status_code=503, detail="Model is not loaded.")
+
+    request_id = uuid.uuid4().hex[:12]
+    logger.info("[%s] /diagnose – %d chars of telemetry", request_id, len(body.telemetry))
+
+    start = time.perf_counter()
     try:
-        response_text = runner.generate(
-            prompt=request.prompt,
-            max_new_tokens=request.max_new_tokens,
-            temperature=request.temperature,
-            top_p=request.top_p
+        result = runner.generate(prompt=body.telemetry)
+    except ValueError as e:
+        logger.warning("[%s] Model output parsing failed: %s", request_id, e)
+        raise HTTPException(
+            status_code=502,
+            detail="Model produced an unparseable response. Please retry.",
         )
-        return GenerateResponse(response=response_text)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception:
+        logger.exception("[%s] Inference error", request_id)
+        raise HTTPException(
+            status_code=500,
+            detail="Internal inference error.",
+        )
+    elapsed_ms = (time.perf_counter() - start) * 1000
+    logger.info("[%s] Inference completed in %.1f ms", request_id, elapsed_ms)
 
-@app.get("/health")
-async def health_check():
-    return {
-        "status": "up",
-        "model_loaded": runner is not None,
-        "base_model": settings.BASE_MODEL,
-        "adapter_model": settings.ADAPTER_MODEL
-    }
+    return DiagnosisResponse(**result)
 
+
+# ---------------------------------------------------------------------------
+# Entrypoint
+# ---------------------------------------------------------------------------
 if __name__ == "__main__":
-    uvicorn.run("main:app", host=settings.HOST, port=settings.PORT, reload=False)
+    import uvicorn
+
+    uvicorn.run(
+        "main:app",
+        host=os.getenv("HOST", "0.0.0.0"),
+        port=int(os.getenv("PORT", "8000")),
+        reload=False,
+    )

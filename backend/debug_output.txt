@@ -1,0 +1,83 @@
+﻿python : Warning: You are sending 
+unauthenticated requests to the HF 
+Hub. Please set a HF_TOKEN to enable 
+higher rate limits and faster 
+downloads.
+At line:1 char:89
++ ... tinue; Start-Sleep -Seconds 2; 
+python test_raw_output.py 2>&1 | Out-F 
+...
++                                    
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpeci 
+   fied: (Warning: You ar...ster down  
+  loads.:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCo 
+   mmandError
+ 
+
+Loading weights:   0%|          | 
+0/290 [00:00<?, ?it/s]
+Loading weights:  39%|###8      | 
+113/290 [00:00<00:00, 1129.90it/s]
+Loading weights:  78%|#######7  | 
+226/290 [00:00<00:00, 709.33it/s] 
+Loading weights: 100%|##########| 
+290/290 [00:00<00:00, 674.01it/s]
+=== FORMATTED PROMPT ===
+<|im_start|>system
+You are KubeRCA, a Kubernetes incident diagnosis model.
+
+Analyze Kubernetes telemetry and produce a strict JSON diagnosis.
+
+The JSON must contain:
+- failure: Summary of what failed.
+- root_cause: The underlying issue (prefer 'unknown/insufficient_evidence' rather than inventing a cause if evidence is insufficient).
+- confidence: A number from 0.0 to 1.0.
+- evidence: Array of strings directly grounded in the supplied telemetry. Do not invent logs, events, metrics, Kubernetes resources, or error messages.
+- severity: Must be exactly SEV-1, SEV-2, or SEV-3.
+
+Return ONLY valid JSON. Do not add explanations outside the JSON.<|im_end|>
+<|im_start|>user
+Pod: payments-api
+Status: CrashLoopBackOff
+Restart Count: 17
+
+Events:
+Back-off restarting failed container
+OOMKilled
+
+Logs:
+Java heap space error
+
+Metrics:
+Memory usage: 98%
+Memory limit: 512Mi<|im_end|>
+<|im_start|>assistant
+
+=== END PROMPT ===
+
+=== RAW MODEL OUTPUT ===
+'{"failure":"Pod exits because memory is exhausted","root_cause":"memory exhaustion","confidence":0.95,"evidence":["container_memory_usage_above_threshold","processes consume all available memory","kubelet restart failed"],"severity":"SEV-2"}'
+=== END RAW OUTPUT ===
+
+Output length: 241 chars
+First '{' at index: 0
+Last '}' at index: 240
+
+=== EXTRACTED JSON STRING ===
+'{"failure":"Pod exits because memory is exhausted","root_cause":"memory exhaustion","confidence":0.95,"evidence":["container_memory_usage_above_threshold","processes consume all available memory","kubelet restart failed"],"severity":"SEV-2"}'
+=== END EXTRACTED ===
+
+JSON parsed successfully:
+{
+  "failure": "Pod exits because memory is exhausted",
+  "root_cause": "memory exhaustion",
+  "confidence": 0.95,
+  "evidence": [
+    "container_memory_usage_above_threshold",
+    "processes consume all available memory",
+    "kubelet restart failed"
+  ],
+  "severity": "SEV-2"
+}

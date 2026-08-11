@@ -5,5 +5,4 @@ transformers
 peft
 torch
 accelerate
-bitsandbytes
 huggingface-hub
