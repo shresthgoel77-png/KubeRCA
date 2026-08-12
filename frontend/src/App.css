@@ -8,7 +8,6 @@
   transition: border-color 0.3s;
   margin-bottom: 24px;
 
-
   &:hover {
     border-color: var(--accent-border);
   }
