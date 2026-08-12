@@ -3,31 +3,8 @@ import { Link } from "react-router-dom";
 import { useUser, useClerk } from "@clerk/clerk-react";
 import { diagnose, NetworkError, TimeoutError, ApiError, ValidationError } from "../services/api";
 import type { DiagnosisResponse, Severity } from "../types/diagnosis";
-
-/* ------------------------------------------------------------------ */
-/* Types                                                               */
-/* ------------------------------------------------------------------ */
-interface UserMessage {
-    role: "user";
-    content: string;
-}
-
-interface AssistantMessage {
-    role: "assistant";
-    data: DiagnosisResponse;
-}
-
-interface ErrorMessage {
-    role: "error";
-    error: string;
-    retryTelemetry: string;
-}
-
-interface LoadingMessage {
-    role: "loading";
-}
-
-type ChatMessage = UserMessage | AssistantMessage | ErrorMessage | LoadingMessage;
+import { useChatSessions } from "../hooks/useChatSessions";
+import type { ChatMessage, ErrorMessage } from "../hooks/useChatSessions";
 
 /* ------------------------------------------------------------------ */
 /* Logo mark                                                           */
@@ -79,7 +56,7 @@ const ConfidenceBar = ({ value }: { value: number }) => {
 };
 
 /* ------------------------------------------------------------------ */
-/* Loading skeleton (3 pulsing dots)                                   */
+/* Loading skeleton                                                    */
 /* ------------------------------------------------------------------ */
 const ThinkingIndicator = () => (
     <div className="flex items-start gap-3">
@@ -98,7 +75,7 @@ const ThinkingIndicator = () => (
 );
 
 /* ------------------------------------------------------------------ */
-/* Diagnosis card (assistant message)                                  */
+/* Diagnosis card                                                      */
 /* ------------------------------------------------------------------ */
 const DiagnosisCard = ({ data }: { data: DiagnosisResponse }) => (
     <div className="flex items-start gap-3">
@@ -106,27 +83,20 @@ const DiagnosisCard = ({ data }: { data: DiagnosisResponse }) => (
             <LogoMark className="h-5 w-5" />
         </div>
         <div className="min-w-0 max-w-2xl space-y-4 rounded-2xl rounded-tl-sm border border-slate-700/50 bg-slate-800/60 px-6 py-5">
-            {/* Severity + Confidence row */}
             <div className="flex flex-wrap items-center gap-4">
                 <SeverityBadge severity={data.severity} />
                 <div className="flex-1 min-w-[140px]">
                     <ConfidenceBar value={data.confidence} />
                 </div>
             </div>
-
-            {/* Failure */}
             <div>
                 <h4 className="mb-1 text-xs font-semibold uppercase tracking-wider text-slate-500">Failure</h4>
                 <p className="text-sm leading-relaxed text-slate-200">{data.failure}</p>
             </div>
-
-            {/* Root Cause */}
             <div>
                 <h4 className="mb-1 text-xs font-semibold uppercase tracking-wider text-slate-500">Root Cause</h4>
                 <p className="text-sm leading-relaxed text-slate-100 font-medium">{data.root_cause}</p>
             </div>
-
-            {/* Evidence */}
             {data.evidence.length > 0 && (
                 <div>
                     <h4 className="mb-2 text-xs font-semibold uppercase tracking-wider text-slate-500">Evidence</h4>
@@ -145,7 +115,7 @@ const DiagnosisCard = ({ data }: { data: DiagnosisResponse }) => (
 );
 
 /* ------------------------------------------------------------------ */
-/* Error message with retry                                            */
+/* Error bubble                                                        */
 /* ------------------------------------------------------------------ */
 const ErrorBubble = ({ error, onRetry }: { error: string; onRetry: () => void }) => (
     <div className="flex items-start gap-3">
@@ -184,25 +154,48 @@ const Dashboard = () => {
     const [telemetry, setTelemetry] = useState("");
     const [messages, setMessages] = useState<ChatMessage[]>([]);
     const [isLoading, setIsLoading] = useState(false);
-    const { isSignedIn } = useUser();
+    const { isSignedIn, user } = useUser();
     const { openSignIn } = useClerk();
     const scrollRef = useRef<HTMLDivElement>(null);
     const textareaRef = useRef<HTMLTextAreaElement>(null);
 
-    // Auto-scroll to bottom when new messages appear
+    const {
+        sessions,
+        activeId,
+        activeSession,
+        saveMessages,
+        startNewChat,
+        switchSession,
+        deleteSession,
+    } = useChatSessions(user?.id);
+
+    // When switching sessions, load that session's messages
+    useEffect(() => {
+        if (activeSession) {
+            setMessages(activeSession.messages);
+            setIsLoading(false);
+        }
+    }, [activeId]); // intentionally only track activeId, not activeSession object
+
+    // Auto-scroll
     useEffect(() => {
         if (scrollRef.current) {
             scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
         }
     }, [messages, isLoading]);
 
+    // Persist messages to localStorage whenever they change (debounced by the hook)
+    useEffect(() => {
+        if (messages.length > 0 && !isLoading) {
+            saveMessages(messages);
+        }
+    }, [messages, isLoading, saveMessages]);
+
     const runDiagnosis = useCallback(async (input: string) => {
         setIsLoading(true);
-
         try {
             const result = await diagnose(input);
             setMessages((prev) => {
-                // Remove any trailing loading indicator
                 const filtered = prev.filter((m) => m.role !== "loading");
                 return [...filtered, { role: "assistant", data: result }];
             });
@@ -217,7 +210,6 @@ const Dashboard = () => {
             } else if (err instanceof ValidationError) {
                 errorMsg = "The backend returned an unexpected response format. This may indicate a model output parsing failure.";
             }
-
             setMessages((prev) => {
                 const filtered = prev.filter((m) => m.role !== "loading");
                 return [...filtered, { role: "error", error: errorMsg, retryTelemetry: input }];
@@ -230,27 +222,17 @@ const Dashboard = () => {
     const handleSend = useCallback(() => {
         const input = telemetry.trim();
         if (!input || isLoading) return;
-
-        // Auth gate
         if (!isSignedIn) {
             openSignIn();
             return;
         }
-
-        // Append user message + loading indicator
         setMessages((prev) => [...prev, { role: "user", content: input }, { role: "loading" }]);
         setTelemetry("");
-
-        // Reset textarea height
-        if (textareaRef.current) {
-            textareaRef.current.style.height = "auto";
-        }
-
+        if (textareaRef.current) textareaRef.current.style.height = "auto";
         runDiagnosis(input);
     }, [telemetry, isLoading, isSignedIn, openSignIn, runDiagnosis]);
 
     const handleRetry = useCallback((retryInput: string) => {
-        // Remove the error message and replace with loading
         setMessages((prev) => {
             const filtered = prev.filter((m) => m.role !== "error" || (m as ErrorMessage).retryTelemetry !== retryInput);
             return [...filtered, { role: "loading" }];
@@ -266,12 +248,30 @@ const Dashboard = () => {
     };
 
     const handleNewAnalysis = () => {
+        startNewChat();
         setMessages([]);
         setTelemetry("");
         setIsLoading(false);
     };
 
+    const handleSwitchSession = (sessionId: string) => {
+        if (sessionId === activeId) return;
+        switchSession(sessionId);
+    };
+
     const hasMessages = messages.length > 0;
+
+    /** Relative time label */
+    const timeAgo = (ts: number): string => {
+        const diff = Date.now() - ts;
+        const mins = Math.floor(diff / 60_000);
+        if (mins < 1) return "just now";
+        if (mins < 60) return `${mins}m ago`;
+        const hrs = Math.floor(mins / 60);
+        if (hrs < 24) return `${hrs}h ago`;
+        const days = Math.floor(hrs / 24);
+        return `${days}d ago`;
+    };
 
     return (
         <div className="flex h-screen bg-slate-950 text-slate-300 font-sans antialiased">
@@ -295,7 +295,40 @@ const Dashboard = () => {
 
                 <div className="flex-1 overflow-y-auto p-3">
                     <h3 className="mb-2 px-2 text-xs font-semibold text-slate-500 uppercase tracking-wider">History</h3>
-                    <div className="px-2 text-sm text-slate-500 italic">No recent investigations</div>
+                    {sessions.length === 0 ? (
+                        <div className="px-2 text-sm text-slate-500 italic">No recent investigations</div>
+                    ) : (
+                        <ul className="space-y-1">
+                            {sessions.map((session) => (
+                                <li key={session.id}>
+                                    <button
+                                        onClick={() => handleSwitchSession(session.id)}
+                                        className={`group flex w-full items-center justify-between gap-2 rounded-md px-2 py-2 text-left text-sm transition-colors ${activeId === session.id
+                                                ? "bg-slate-800 text-slate-100"
+                                                : "text-slate-400 hover:bg-slate-800/50 hover:text-slate-200"
+                                            }`}
+                                    >
+                                        <span className="min-w-0 flex-1 truncate">{session.title}</span>
+                                        <div className="flex shrink-0 items-center gap-1">
+                                            <span className="text-[10px] text-slate-600">{timeAgo(session.updatedAt)}</span>
+                                            <button
+                                                onClick={(e) => {
+                                                    e.stopPropagation();
+                                                    deleteSession(session.id);
+                                                }}
+                                                className="hidden rounded p-0.5 text-slate-600 hover:bg-red-500/10 hover:text-red-400 group-hover:block"
+                                                title="Delete session"
+                                            >
+                                                <svg xmlns="http://www.w3.org/2000/svg" className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                                                    <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                                                </svg>
+                                            </button>
+                                        </div>
+                                    </button>
+                                </li>
+                            ))}
+                        </ul>
+                    )}
                 </div>
 
                 <div className="border-t border-slate-800 p-4">
@@ -315,7 +348,6 @@ const Dashboard = () => {
 
             {/* ---- Main ---- */}
             <main className="flex flex-1 flex-col relative min-w-0">
-                {/* Header */}
                 <header className="flex h-14 items-center justify-between border-b border-white/5 px-4 backdrop-blur-md sticky top-0 z-10">
                     <div className="flex items-center" />
                     <button className="flex items-center gap-2 rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-sm font-medium text-slate-300 transition-colors hover:bg-slate-800 hover:text-white">
@@ -326,10 +358,9 @@ const Dashboard = () => {
                     </button>
                 </header>
 
-                {/* Scrollable Chat Area */}
+                {/* Chat Area */}
                 <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-8">
                     {!hasMessages ? (
-                        /* Empty state */
                         <div className="mx-auto flex h-full max-w-3xl flex-col items-center justify-center text-center">
                             <div className="mb-6 flex h-16 w-16 items-center justify-center rounded-2xl bg-cyan-500/10 text-cyan-400">
                                 <LogoMark className="h-10 w-10" />
@@ -340,7 +371,6 @@ const Dashboard = () => {
                             </p>
                         </div>
                     ) : (
-                        /* Chat thread */
                         <div className="mx-auto max-w-3xl space-y-6">
                             {messages.map((msg, i) => {
                                 switch (msg.role) {
