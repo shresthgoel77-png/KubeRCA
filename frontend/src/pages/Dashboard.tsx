@@ -4,7 +4,15 @@ import { useUser, useClerk } from "@clerk/clerk-react";
 import { diagnose, NetworkError, TimeoutError, ApiError, ValidationError } from "../services/api";
 import type { DiagnosisResponse, Severity } from "../types/diagnosis";
 import { useChatSessions } from "../hooks/useChatSessions";
+import { useHealthCheck } from "../hooks/useHealthCheck";
+import ChatErrorBoundary from "../components/ChatErrorBoundary";
 import type { ChatMessage, ErrorMessage } from "../hooks/useChatSessions";
+
+/* ------------------------------------------------------------------ */
+/* Constants                                                           */
+/* ------------------------------------------------------------------ */
+const MAX_TELEMETRY_CHARS = 10_000;
+const SLOW_INFERENCE_MS = 10_000; // show "still working" after 10s
 
 /* ------------------------------------------------------------------ */
 /* Logo mark                                                           */
@@ -56,23 +64,38 @@ const ConfidenceBar = ({ value }: { value: number }) => {
 };
 
 /* ------------------------------------------------------------------ */
-/* Loading skeleton                                                    */
+/* Thinking indicator with slow-inference escalation                   */
 /* ------------------------------------------------------------------ */
-const ThinkingIndicator = () => (
-    <div className="flex items-start gap-3">
-        <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-cyan-500/10 text-cyan-400">
-            <LogoMark className="h-5 w-5" />
-        </div>
-        <div className="rounded-2xl rounded-tl-sm bg-slate-800 px-5 py-4">
-            <div className="flex items-center gap-1.5">
-                <span className="h-2 w-2 animate-pulse rounded-full bg-slate-400" style={{ animationDelay: "0ms" }} />
-                <span className="h-2 w-2 animate-pulse rounded-full bg-slate-400" style={{ animationDelay: "200ms" }} />
-                <span className="h-2 w-2 animate-pulse rounded-full bg-slate-400" style={{ animationDelay: "400ms" }} />
+const ThinkingIndicator = ({ startedAt }: { startedAt: number }) => {
+    const [elapsed, setElapsed] = useState(0);
+
+    useEffect(() => {
+        const id = setInterval(() => setElapsed(Date.now() - startedAt), 1000);
+        return () => clearInterval(id);
+    }, [startedAt]);
+
+    const isSlow = elapsed > SLOW_INFERENCE_MS;
+
+    return (
+        <div className="flex items-start gap-3">
+            <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-cyan-500/10 text-cyan-400">
+                <LogoMark className="h-5 w-5" />
             </div>
-            <p className="mt-2 text-xs text-slate-500">Analyzing telemetry — this may take up to 30 s…</p>
+            <div className="rounded-2xl rounded-tl-sm bg-slate-800 px-5 py-4">
+                <div className="flex items-center gap-1.5">
+                    <span className="h-2 w-2 animate-pulse rounded-full bg-slate-400" style={{ animationDelay: "0ms" }} />
+                    <span className="h-2 w-2 animate-pulse rounded-full bg-slate-400" style={{ animationDelay: "200ms" }} />
+                    <span className="h-2 w-2 animate-pulse rounded-full bg-slate-400" style={{ animationDelay: "400ms" }} />
+                </div>
+                <p className="mt-2 text-xs text-slate-500">
+                    {isSlow
+                        ? `Still working (${Math.floor(elapsed / 1000)}s) — the model runs locally and may need extra time for long inputs.`
+                        : "Analyzing telemetry — this may take up to 30 s…"}
+                </p>
+            </div>
         </div>
-    </div>
-);
+    );
+};
 
 /* ------------------------------------------------------------------ */
 /* Diagnosis card                                                      */
@@ -147,6 +170,28 @@ const UserBubble = ({ content }: { content: string }) => (
     </div>
 );
 
+/* ------------------------------------------------------------------ */
+/* Backend-down banner                                                 */
+/* ------------------------------------------------------------------ */
+const HealthBanner = ({ onRetry, isChecking }: { onRetry: () => void; isChecking: boolean }) => (
+    <div className="flex items-center justify-between gap-3 border-b border-red-500/20 bg-red-500/5 px-4 py-2.5">
+        <div className="flex items-center gap-2 text-sm text-red-300">
+            <span className="relative flex h-2.5 w-2.5">
+                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-red-400 opacity-75" />
+                <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-red-500" />
+            </span>
+            Backend unavailable — the inference server is not responding. Diagnosis requests will fail.
+        </div>
+        <button
+            onClick={onRetry}
+            disabled={isChecking}
+            className="shrink-0 rounded-md bg-red-500/10 px-3 py-1 text-xs font-medium text-red-400 transition-colors hover:bg-red-500/20 disabled:opacity-50"
+        >
+            {isChecking ? "Checking…" : "Retry"}
+        </button>
+    </div>
+);
+
 /* ================================================================== */
 /* DASHBOARD                                                           */
 /* ================================================================== */
@@ -154,10 +199,12 @@ const Dashboard = () => {
     const [telemetry, setTelemetry] = useState("");
     const [messages, setMessages] = useState<ChatMessage[]>([]);
     const [isLoading, setIsLoading] = useState(false);
+    const [inferenceStartedAt, setInferenceStartedAt] = useState<number>(0);
     const { isSignedIn, user } = useUser();
     const { openSignIn } = useClerk();
     const scrollRef = useRef<HTMLDivElement>(null);
     const textareaRef = useRef<HTMLTextAreaElement>(null);
+    const { isAvailable, isChecking, recheckNow } = useHealthCheck();
 
     const {
         sessions,
@@ -169,13 +216,13 @@ const Dashboard = () => {
         deleteSession,
     } = useChatSessions(user?.id);
 
-    // When switching sessions, load that session's messages
+    // Load session messages when switching
     useEffect(() => {
         if (activeSession) {
             setMessages(activeSession.messages);
             setIsLoading(false);
         }
-    }, [activeId]); // intentionally only track activeId, not activeSession object
+    }, [activeId]);
 
     // Auto-scroll
     useEffect(() => {
@@ -184,7 +231,7 @@ const Dashboard = () => {
         }
     }, [messages, isLoading]);
 
-    // Persist messages to localStorage whenever they change (debounced by the hook)
+    // Persist to localStorage
     useEffect(() => {
         if (messages.length > 0 && !isLoading) {
             saveMessages(messages);
@@ -193,6 +240,7 @@ const Dashboard = () => {
 
     const runDiagnosis = useCallback(async (input: string) => {
         setIsLoading(true);
+        setInferenceStartedAt(Date.now());
         try {
             const result = await diagnose(input);
             setMessages((prev) => {
@@ -209,6 +257,7 @@ const Dashboard = () => {
                 errorMsg = (err as ApiError).message;
             } else if (err instanceof ValidationError) {
                 errorMsg = "The backend returned an unexpected response format. This may indicate a model output parsing failure.";
+                console.error("[Dashboard] ValidationError details:", err);
             }
             setMessages((prev) => {
                 const filtered = prev.filter((m) => m.role !== "loading");
@@ -216,21 +265,27 @@ const Dashboard = () => {
             });
         } finally {
             setIsLoading(false);
+            setInferenceStartedAt(0);
         }
     }, []);
 
+    /* ---- Derived state ---- */
+    const charCount = telemetry.length;
+    const isOverLimit = charCount > MAX_TELEMETRY_CHARS;
+    const canSend = telemetry.trim().length > 0 && !isLoading && !isOverLimit;
+
     const handleSend = useCallback(() => {
-        const input = telemetry.trim();
-        if (!input || isLoading) return;
+        if (!canSend) return;
         if (!isSignedIn) {
             openSignIn();
             return;
         }
-        setMessages((prev) => [...prev, { role: "user", content: input }, { role: "loading" }]);
+        setMessages((prev) => [...prev, { role: "user", content: telemetry.trim() }, { role: "loading" }]);
+        const input = telemetry.trim();
         setTelemetry("");
         if (textareaRef.current) textareaRef.current.style.height = "auto";
         runDiagnosis(input);
-    }, [telemetry, isLoading, isSignedIn, openSignIn, runDiagnosis]);
+    }, [telemetry, canSend, isSignedIn, openSignIn, runDiagnosis]);
 
     const handleRetry = useCallback((retryInput: string) => {
         setMessages((prev) => {
@@ -261,7 +316,6 @@ const Dashboard = () => {
 
     const hasMessages = messages.length > 0;
 
-    /** Relative time label */
     const timeAgo = (ts: number): string => {
         const diff = Date.now() - ts;
         const mins = Math.floor(diff / 60_000);
@@ -348,6 +402,7 @@ const Dashboard = () => {
 
             {/* ---- Main ---- */}
             <main className="flex flex-1 flex-col relative min-w-0">
+                {/* Header */}
                 <header className="flex h-14 items-center justify-between border-b border-white/5 px-4 backdrop-blur-md sticky top-0 z-10">
                     <div className="flex items-center" />
                     <button className="flex items-center gap-2 rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-sm font-medium text-slate-300 transition-colors hover:bg-slate-800 hover:text-white">
@@ -358,42 +413,52 @@ const Dashboard = () => {
                     </button>
                 </header>
 
-                {/* Chat Area */}
-                <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-8">
-                    {!hasMessages ? (
-                        <div className="mx-auto flex h-full max-w-3xl flex-col items-center justify-center text-center">
-                            <div className="mb-6 flex h-16 w-16 items-center justify-center rounded-2xl bg-cyan-500/10 text-cyan-400">
-                                <LogoMark className="h-10 w-10" />
+                {/* Health banner */}
+                {isAvailable === false && (
+                    <HealthBanner onRetry={recheckNow} isChecking={isChecking} />
+                )}
+
+                {/* Chat Area — wrapped in ErrorBoundary */}
+                <ChatErrorBoundary>
+                    <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-8">
+                        {!hasMessages ? (
+                            <div className="mx-auto flex h-full max-w-3xl flex-col items-center justify-center text-center">
+                                <div className="mb-6 flex h-16 w-16 items-center justify-center rounded-2xl bg-cyan-500/10 text-cyan-400">
+                                    <LogoMark className="h-10 w-10" />
+                                </div>
+                                <h1 className="mb-3 text-3xl font-semibold text-slate-100">How can I help you diagnose?</h1>
+                                <p className="max-w-md text-slate-400">
+                                    Paste your Kubernetes telemetry logs, events, or describe symptom behavior. The model will analyze it and pinpoint the root cause.
+                                </p>
                             </div>
-                            <h1 className="mb-3 text-3xl font-semibold text-slate-100">How can I help you diagnose?</h1>
-                            <p className="max-w-md text-slate-400">
-                                Paste your Kubernetes telemetry logs, events, or describe symptom behavior. The model will analyze it and pinpoint the root cause.
-                            </p>
-                        </div>
-                    ) : (
-                        <div className="mx-auto max-w-3xl space-y-6">
-                            {messages.map((msg, i) => {
-                                switch (msg.role) {
-                                    case "user":
-                                        return <UserBubble key={i} content={msg.content} />;
-                                    case "assistant":
-                                        return <DiagnosisCard key={i} data={msg.data} />;
-                                    case "error":
-                                        return <ErrorBubble key={i} error={msg.error} onRetry={() => handleRetry(msg.retryTelemetry)} />;
-                                    case "loading":
-                                        return <ThinkingIndicator key={i} />;
-                                    default:
-                                        return null;
-                                }
-                            })}
-                        </div>
-                    )}
-                </div>
+                        ) : (
+                            <div className="mx-auto max-w-3xl space-y-6">
+                                {messages.map((msg, i) => {
+                                    switch (msg.role) {
+                                        case "user":
+                                            return <UserBubble key={i} content={msg.content} />;
+                                        case "assistant":
+                                            return <DiagnosisCard key={i} data={msg.data} />;
+                                        case "error":
+                                            return <ErrorBubble key={i} error={msg.error} onRetry={() => handleRetry(msg.retryTelemetry)} />;
+                                        case "loading":
+                                            return <ThinkingIndicator key={i} startedAt={inferenceStartedAt} />;
+                                        default:
+                                            return null;
+                                    }
+                                })}
+                            </div>
+                        )}
+                    </div>
+                </ChatErrorBoundary>
 
                 {/* Input */}
                 <div className="w-full shrink-0 bg-gradient-to-t from-slate-950 px-4 pb-6 pt-4">
                     <div className="mx-auto max-w-3xl relative">
-                        <div className="relative flex w-full flex-col overflow-hidden rounded-xl border border-slate-700 bg-slate-800 focus-within:border-slate-500 focus-within:ring-1 focus-within:ring-slate-500 transition-all">
+                        <div className={`relative flex w-full flex-col overflow-hidden rounded-xl border bg-slate-800 transition-all ${isOverLimit
+                                ? "border-red-500/60 focus-within:border-red-500 focus-within:ring-1 focus-within:ring-red-500"
+                                : "border-slate-700 focus-within:border-slate-500 focus-within:ring-1 focus-within:ring-slate-500"
+                            }`}>
                             <textarea
                                 ref={textareaRef}
                                 value={telemetry}
@@ -412,7 +477,7 @@ const Dashboard = () => {
                             />
                             <button
                                 onClick={handleSend}
-                                disabled={!telemetry.trim() || isLoading}
+                                disabled={!canSend}
                                 className="absolute bottom-2 right-2 flex h-8 w-8 items-center justify-center rounded-md bg-cyan-500 text-white transition-opacity disabled:opacity-30 hover:bg-cyan-400"
                             >
                                 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="h-4 w-4 transform -rotate-90">
@@ -420,8 +485,20 @@ const Dashboard = () => {
                                 </svg>
                             </button>
                         </div>
-                        <div className="mt-2 text-center text-xs text-slate-500">
-                            KubeRCA can make mistakes. Consider verifying critical findings before taking destructive action.
+
+                        {/* Footer row: char count warning + disclaimer */}
+                        <div className="mt-2 flex items-center justify-between text-xs">
+                            {charCount > 0 ? (
+                                <span className={isOverLimit ? "font-medium text-red-400" : "text-slate-600"}>
+                                    {charCount.toLocaleString()} / {MAX_TELEMETRY_CHARS.toLocaleString()} chars
+                                    {isOverLimit && " — too long, please shorten your input"}
+                                </span>
+                            ) : (
+                                <span />
+                            )}
+                            <span className="text-slate-500">
+                                KubeRCA can make mistakes. Verify critical findings.
+                            </span>
                         </div>
                     </div>
                 </div>
