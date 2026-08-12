@@ -1,4 +1,4 @@
-import { DiagnosisResponse } from '../types/diagnosis';
+import type { DiagnosisResponse } from '../types/diagnosis';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
 const DEFAULT_TIMEOUT_MS = 30 * 1000;
@@ -18,8 +18,10 @@ export class TimeoutError extends Error {
 }
 
 export class ApiError extends Error {
-    constructor(public status: number, message: string) {
+    public status: number;
+    constructor(status: number, message: string) {
         super(message);
+        this.status = status;
         this.name = 'ApiError';
     }
 }
